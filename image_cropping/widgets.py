@@ -1,49 +1,102 @@
+from __future__ import unicode_literals
+import urllib
+
 import logging
-import inspect
-import warnings
 
-from django.db.models import get_model, ObjectDoesNotExist
+from django import forms
+from django.contrib.admin.templatetags import admin_static
 from django.contrib.admin.widgets import AdminFileWidget, ForeignKeyRawIdWidget
-from django.conf import settings
+from django.db.models import ObjectDoesNotExist
 
-from easy_thumbnails.files import get_thumbnailer
+from oposod.s3utils import s3_upload_file
+from .config import settings
+from .utils import get_backend
+
+try:
+    # Django >= 1.9
+    from django.apps import apps
+
+    get_model = apps.get_model
+except ImportError:
+    from django.db.models import get_model
 
 logger = logging.getLogger(__name__)
 
 
-def thumbnail(image_path):
-    thumbnailer = get_thumbnailer(image_path)
+def thumbnail_url(image_path):
     thumbnail_options = {
         'detail': True,
-        'size': getattr(settings, 'IMAGE_CROPPING_THUMB_SIZE', (300, 300)),
+        'upscale': True,
+        'size': settings.IMAGE_CROPPING_THUMB_SIZE,
     }
-    thumb = thumbnailer.get_thumbnail(thumbnail_options)
-    return thumb.url
+    # This is not saving on s3
+    url = get_backend().get_thumbnail_url(image_path, thumbnail_options)
+    # So I have upload the generated thumbnail from upper line to S3
+    my_file = url.split("/", 4)[-1]
+    my_file = urllib.unquote(my_file).decode('utf8')
+    from_file = settings.MEDIA_ROOT + "/" + my_file
+    to_key = settings.MEDIAFILES_LOCATION + "/" + my_file
+    s3_upload_file(from_file=from_file, to_key=to_key, acl="public-read")
+    return url
 
 
 def get_attrs(image, name):
+    print 'widget: ', image, name, image.url
     try:
+        # TODO test case
+        try:
+            # try to use image as a file
+            # If the image file has already been closed, open it
+            if image.closed:
+                image.open()
+
+            # Seek to the beginning of the file.  This is necessary if the
+            # image has already been read using this file handler
+            image.seek(0)
+        except:
+            pass
+
+        try:
+            # open image and rotate according to its exif.orientation
+            width, height = get_backend().get_size(image)
+        except AttributeError:
+            # invalid image -> AttributeError
+            width = image.width
+            height = image.height
         return {
             'class': "crop-thumb",
-            'data-thumbnail-url': thumbnail(image),
+            'data-thumbnail-url': thumbnail_url(image),
             'data-field-name': name,
-            'data-org-width': image.width,
-            'data-org-height': image.height,
+            'data-org-width': width,
+            'data-org-height': height,
+            'data-max-width': width,
+            'data-max-height': height,
         }
-    except ValueError:
+    except (ValueError, AttributeError, IOError):
         # can't create thumbnail from image
         return {}
 
 
 class CropWidget(object):
-    class Media:
-        js = (
-            getattr(settings, 'JQUERY_URL',
-                    'https://ajax.googleapis.com/ajax/libs/jquery/1.7.2/jquery.min.js'),
+    def _media(self):
+        js = [
             "image_cropping/js/jquery.Jcrop.min.js",
             "image_cropping/image_cropping.js",
-        )
-        css = {'all': ("image_cropping/css/jquery.Jcrop.min.css",)}
+        ]
+        js = [admin_static.static(path) for path in js]
+
+        if settings.IMAGE_CROPPING_JQUERY_URL:
+            js.insert(0, settings.IMAGE_CROPPING_JQUERY_URL)
+
+        css = [
+            "image_cropping/css/jquery.Jcrop.min.css",
+            "image_cropping/css/image_cropping.css",
+        ]
+        css = {'all': [admin_static.static(path) for path in css]}
+
+        return forms.Media(css=css, js=js)
+
+    media = property(_media)
 
 
 class ImageCropWidget(AdminFileWidget, CropWidget):
@@ -69,18 +122,6 @@ class HiddenImageCropWidget(ImageCropWidget):
 class CropForeignKeyWidget(ForeignKeyRawIdWidget, CropWidget):
     def __init__(self, *args, **kwargs):
         self.field_name = kwargs.pop('field_name')
-        # Django versions 1.4+ need the admin site passed in
-        if 'admin_site' in inspect.getargspec(ForeignKeyRawIdWidget.__init__)[0]:
-            # Django 1.4+
-            if 'admin_site' not in kwargs:
-                warnings.warn('Please use the ImageCroppingMixin in your ModelAdmin '
-                              'instead of the CropForeignKey.', DeprecationWarning)
-                from django.contrib.admin.sites import site
-                kwargs['admin_site'] = site
-        elif 'admin_site' in kwargs:
-            # Django < 1.4 and admin_site passed in from ImageCroppingMixin
-            del kwargs['admin_site']
-
         super(CropForeignKeyWidget, self).__init__(*args, **kwargs)
 
     def render(self, name, value, attrs=None):
@@ -95,8 +136,9 @@ class CropForeignKeyWidget(ForeignKeyRawIdWidget, CropWidget):
                     get_model(app_name, model_name).objects.get(pk=value),
                     self.field_name,
                 )
-                attrs.update(get_attrs(image, name))
-            except ObjectDoesNotExist:
+                if image:
+                    attrs.update(get_attrs(image, name))
+            except (ObjectDoesNotExist, LookupError):
                 logger.error("Can't find object: %s.%s with primary key %s "
                              "for cropping." % (app_name, model_name, value))
             except AttributeError:

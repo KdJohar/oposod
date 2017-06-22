@@ -1,13 +1,16 @@
-#from django.conf import settings
+import random
+import uuid
+
+import os
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import models
-from django_extensions.utils import uuid
+from image_cropping.fields import ImageRatioField
+from imagekit.models import ImageSpecField
+from imagekit.processors import ResizeToFill
+
 from djorm_expressions.models import ExpressionManager
 from djorm_pgarray.fields import ArrayField
-from image_cropping.fields import ImageRatioField, ImageCropField
-from oposod.settings import MEDIA_ROOT
-import os
-import random
 
 
 class Profile(models.Model):
@@ -27,12 +30,28 @@ class Status(models.Model):
 
 
 class ProfilePhoto(models.Model):
+    def get_upload_path(self, filename):
+        try:
+            ext = filename.rsplit('.', -1)[-1]
+        except:
+            ext = 'jpg'
+        filename = "%s.%s" % (uuid.uuid4(), ext)
+        profile_photo_url = os.path.join("profile_photo", "amityadav", filename)
+        return profile_photo_url
+
     user = models.ForeignKey(User, null=True)
-    profile_photo = ImageCropField(upload_to='profile_photo/')
+    profile_photo = models.ImageField(max_length=2000, upload_to=get_upload_path)
     cropping = ImageRatioField('profile_photo', '220x196')
     uploaded_on = models.DateTimeField(null=True)
     is_set = models.BooleanField(default=False)
     key = models.CharField(max_length=90)
+
+    profile_photo_100x50 = ImageSpecField(
+        source='profile_photo',
+        processors=[ResizeToFill(100, 50)],
+        format='JPEG',
+        options={'quality': 90}
+    )
 
     @property
     def key_generate(self):
@@ -59,6 +78,7 @@ class CoverPhoto(models.Model):
             ext = 'jpg'
         filename = "%s.%s" % (uuid.uuid4(), ext)
         return os.path.join(self.cover_photo_path, filename)
+
     cover_photo = models.ImageField(upload_to=get_upload_path)
     uploaded_on = models.DateTimeField()
     key = models.CharField(max_length=90)
@@ -80,11 +100,13 @@ class DailyPhoto(models.Model):
 
     def get_upload_path(self, filename):
         try:
-            ext = filename.split('.')[-1]
+            ext = filename.rsplit('.', -1)[-1]
         except:
             ext = 'jpg'
         filename = "%s.%s" % (uuid.uuid4(), ext)
-        return os.path.join(self.photo_path, filename)
+        daily_photo_url = os.path.join("daily_photo", "amityadav", filename)
+        return daily_photo_url
+
     photo = models.ImageField(upload_to=get_upload_path)
     moods = models.CharField(max_length=20, null=True)
     heading = models.TextField(null=True)
@@ -93,6 +115,21 @@ class DailyPhoto(models.Model):
     uploaded_on = models.DateField(null=True)
     is_public = models.BooleanField(default=False)
     key = models.CharField(max_length=90)
+
+    # Imagekit sizes
+    daily_photo_100x100 = ImageSpecField(
+        source='photo',
+        processors=[ResizeToFill(100, 100)],
+        format='JPEG',
+        options={'quality': 90}
+    )
+
+    daily_photo_200x200 = ImageSpecField(
+        source='photo',
+        processors=[ResizeToFill(200, 200)],
+        format='JPEG',
+        options={'quality': 90}
+    )
 
     @property
     def key_generate(self):
@@ -105,7 +142,7 @@ class DailyPhoto(models.Model):
                 return key
 
     def get_absolute_url(self):
-        return "%s/%s" % (MEDIA_ROOT, self.photo_path)
+        return "%s/%s" % (settings.MEDIA_ROOT, self.photo_path)
 
     def __unicode__(self):
         return unicode(self.photo_path)
